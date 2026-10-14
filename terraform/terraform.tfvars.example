@@ -1,0 +1,6 @@
+# Copie ce fichier en terraform.tfvars (jamais commite) et mets tes valeurs.
+my_ip_cidr = "81.240.12.34/32" # ton IP publique : https://ifconfig.me
+
+# Si la region ou la taille est refusee (erreur 403 ou 409), change ici :
+# location = "austriaeast"
+# vm_size  = "Standard_B2als_v2"

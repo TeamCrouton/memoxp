@@ -1,0 +1,18 @@
+# Fait entrer le trafic du port 80 de la VM (routeur Traefik de K3s) vers le front.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: memoxp
+  namespace: memoxp
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80

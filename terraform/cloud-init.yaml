@@ -1,0 +1,39 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - docker.io
+  - ufw
+  - fail2ban
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/10-memoxp.conf
+    content: |
+      Port ${ssh_port}
+      PasswordAuthentication no
+      PermitRootLogin no
+      X11Forwarding no
+      MaxAuthTries 3
+  - path: /etc/fail2ban/jail.d/sshd.local
+    content: |
+      [sshd]
+      enabled = true
+      port = ${ssh_port}
+
+runcmd:
+  # Docker (utile pour construire une image a la main si besoin)
+  - systemctl enable --now docker
+  - usermod -aG docker ${username}
+  # Pare-feu Linux : le port SSH est autorise AVANT d'activer ufw
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow ${ssh_port}/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw allow from 10.42.0.0/16 # reseau des pods K3s
+  - ufw allow from 10.43.0.0/16 # reseau des services K3s
+  - ufw --force enable
+  - systemctl enable --now fail2ban
+  - systemctl restart ssh
+  # Kubernetes leger (XP03)
+  - curl -sfL https://get.k3s.io | sh -

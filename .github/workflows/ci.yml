@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, prod]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write # pour publier les images sur GHCR
+
+jobs:
+  quality:
+    name: Qualite (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [api, web]
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - run: npm run lint --if-present
+      - run: npm run typecheck
+      - run: npm run build
+
+  images:
+    name: Images Docker de bout en bout
+    needs: quality
+    runs-on: ubuntu-latest
+    env:
+      API_IMAGE: memoxp-api:ci
+      WEB_IMAGE: memoxp-web:ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construire et demarrer
+        run: docker compose up -d --build --wait
+
+      - name: Tests de bout en bout
+        run: scripts/e2e.sh http://localhost:8080
+
+      - name: Les donnees survivent a la recreation des conteneurs
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d '{"content":"je survis"}' http://localhost:8080/api/memos > /dev/null
+          docker compose down          # sans -v : le volume reste
+          docker compose up -d --wait
+          curl -fsS http://localhost:8080/api/memos | jq -e '.[0].content == "je survis"'
+
+      - name: Arret propre (moins de 10 s)
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          docker compose stop api
+          elapsed=$(( $(date +%s) - start ))
+          echo "arrete en ${elapsed}s"
+          [ "$elapsed" -lt 10 ]
+          docker compose logs api > /tmp/api-stop.log 2>&1   # fichier puis grep : evite le SIGPIPE
+          grep -q 'arrêt propre' /tmp/api-stop.log
+
+      # Action epinglee sur le SHA du commit de v0.36.0 (une attaque a touche certains tags en 2026)
+      # https://github.com/aquasecurity/trivy-action/releases
+      - name: Scan Trivy (api)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: memoxp-api:ci
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Scan Trivy (web)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: memoxp-web:ci
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Publier sur GHCR
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"   # GHCR exige des minuscules
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for app in api web; do
+            for tag in "${GITHUB_SHA::7}" "${GITHUB_REF_NAME}"; do
+              docker tag "memoxp-$app:ci" "ghcr.io/$owner/memoxp-$app:$tag"
+              docker push "ghcr.io/$owner/memoxp-$app:$tag"
+            done
+          done
+
+      - name: Logs (si echec)
+        if: failure()
+        run: docker compose logs
+
+      - name: Nettoyage
+        if: always()
+        run: docker compose down -v
+
+  terraform:
+    name: Terraform (format et validation)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+
+  k8s:
+    name: Manifests Kubernetes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Valider avec kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -summary k8s/

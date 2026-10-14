@@ -1,0 +1,65 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [prod]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag d'image a deployer (ex. a1b2c3d) pour revenir en arriere"
+        required: true
+
+concurrency: deploy-production
+
+jobs:
+  deploy:
+    name: Deploiement VPS
+    # Ne deploie que si la CI de prod est verte (ou sur demande manuelle)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Preparer SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          echo "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Deployer
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          PORT: ${{ secrets.VPS_PORT }}
+          USER: ${{ secrets.VPS_USER }}
+          TAG_INPUT: ${{ inputs.tag }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          TAG="${TAG_INPUT:-${SHA::7}}"
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "Deploiement de la version $TAG"
+          scp -P "$PORT" -i ~/.ssh/deploy docker-compose.yml "$USER@$HOST:/opt/memoxp/"
+          ssh -p "$PORT" -i ~/.ssh/deploy "$USER@$HOST" bash -s <<EOS
+          set -euo pipefail
+          cd /opt/memoxp
+          sed -i '/^API_IMAGE=/d;/^WEB_IMAGE=/d' .env
+          echo "API_IMAGE=ghcr.io/$OWNER/memoxp-api:$TAG" >> .env
+          echo "WEB_IMAGE=ghcr.io/$OWNER/memoxp-web:$TAG" >> .env
+          docker compose pull api web db
+          docker compose up -d --no-build --wait
+          docker image prune -f
+          EOS
+
+      - name: Verifier le site
+        run: |
+          sleep 3
+          curl -fsS "http://${{ secrets.VPS_HOST }}:${{ vars.WEB_PORT || '80' }}/api/memos" > /dev/null

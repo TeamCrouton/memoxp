@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: memoxp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memoxp}
+      POSTGRES_DB: memoxp
+    volumes:
+      - db-data:/var/lib/postgresql/data   # les mémos survivent aux redémarrages
+    ports:
+      - "127.0.0.1:5432:5432"              # accessible seulement depuis la machine
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoxp"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: ./api
+    image: ${API_IMAGE:-memoxp-api:local}
+    environment:
+      DATABASE_URL: postgres://memoxp:${POSTGRES_PASSWORD:-memoxp}@db:5432/memoxp
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    image: ${WEB_IMAGE:-memoxp-web:local}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db-data:
