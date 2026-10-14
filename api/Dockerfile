@@ -9,6 +9,7 @@ RUN npm run build
 
 # Étape 2 : image finale, légère
 FROM node:22-alpine
+RUN apk update && apk upgrade
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./
